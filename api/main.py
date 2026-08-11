@@ -1,12 +1,14 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import os
-from upstash_redis import Redis
+try:
+    from upstash_redis import Redis
+    # Vercel 환경변수 자동 연결
+    redis = Redis.from_env()
+except Exception:
+    redis = None
 
 app = FastAPI()
-
-# Vercel-Upstash 연결 금고 자동 호출
-redis = Redis.from_env()
 
 TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "60m", "2h", "3h", "4h", "8h", "1d", "3d"]
 STRATEGIES = ["A", "B", "C"]
@@ -22,15 +24,15 @@ class StrategyData(BaseModel):
 
 @app.get("/")
 async def root():
-    return {"status": "Persistent Engine Online", "storage": "Upstash Redis Active"}
+    status = "Connected" if redis else "Disconnected"
+    return {"status": "Engine Live", "redis": status}
 
 @app.post("/update")
 async def update_data(data: StrategyData):
+    if not redis: return {"status": "error", "msg": "Redis not connected"}
     symbol = data.symbol.upper()
     strat_key = data.strategy_name[-1].upper()
     db_key = f"{symbol}:{data.timeframe}:{strat_key}"
-    
-    # 데이터를 금고에 영구 저장
     redis.set(db_key, data.dict())
     return {"status": "success"}
 
@@ -45,7 +47,7 @@ async def get_matrix(symbol: str):
         row = {"Timeframe": tf}
         for strat in STRATEGIES:
             db_key = f"{symbol}:{tf}:{strat}"
-            d = redis.get(db_key)
+            d = redis.get(db_key) if redis else None
             
             if d:
                 profit = d.get('net_profit_pct', 0)
@@ -53,7 +55,6 @@ async def get_matrix(symbol: str):
                 row[f"Strat_{strat}_Profit"] = profit
                 row[f"Strat_{strat}_MDD"] = mdd
                 row[f"Strat_{strat}_WinRate"] = d.get('win_rate', 0)
-                
                 score = profit / (abs(mdd) + 0.001)
                 if score > best_score:
                     best_score = score
@@ -64,7 +65,4 @@ async def get_matrix(symbol: str):
                 row[f"Strat_{strat}_WinRate"] = 0
         matrix_data.append(row)
 
-    return {
-        "BEST_STRATEGY_FOUND": best_info,
-        "MATRIX": matrix_data
-    }
+    return {"BEST_STRATEGY_FOUND": best_info, "MATRIX": matrix_data}
